@@ -73,12 +73,12 @@ pub struct CircuitBuilder<F: RichField + Extendable<D>, const D: usize> {
     /// these constants with gate index `g` and already using `i` arithmetic operations.
     pub(crate) free_arithmetic: HashMap<(F, F), (usize, usize)>,
 
-    // `current_switch_gates[chunk_size - 1]` contains None if we have no switch gates with the value
-    // chunk_size, and contains `(g, i, c)`, if the gate `g`, at index `i`, already contains `c` copies
-    // of switches
+    /// `current_switch_gates[chunk_size - 1]` contains None if we have no switch gates with the value
+    /// chunk_size, and contains `(g, i, c)`, if the gate `g`, at index `i`, already contains `c` copies
+    /// of switches
     pub(crate) current_switch_gates: Vec<Option<(SwitchGate<F, D>, usize, usize)>>,
 
-    // The `U32ArithmeticGate` currently being filled (so new u32 arithmetic operations will be added to this gate before creating a new one)
+    /// The `U32ArithmeticGate` currently being filled (so new u32 arithmetic operations will be added to this gate before creating a new one)
     pub(crate) current_u32_arithmetic_gate: Option<(usize, usize)>,
 }
 
