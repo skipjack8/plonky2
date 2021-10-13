@@ -18,6 +18,7 @@ pub mod poseidon;
 pub(crate) mod public_input;
 pub mod random_access;
 pub mod reducing;
+pub mod subtraction_u32;
 pub mod switch;
 
 #[cfg(test)]
