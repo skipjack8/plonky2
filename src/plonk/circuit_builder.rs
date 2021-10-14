@@ -14,6 +14,8 @@ use crate::fri::commitment::PolynomialBatchCommitment;
 use crate::fri::FriParams;
 use crate::gadgets::arithmetic_u32::U32Target;
 use crate::gates::arithmetic::ArithmeticExtensionGate;
+use crate::gates::arithmetic_u32::{NUM_U32_ARITHMETIC_OPS, U32ArithmeticGate};
+use crate::gates::subtraction_u32::{NUM_U32_SUBTRACTION_OPS, U32SubtractionGate};
 use crate::gates::constant::ConstantGate;
 use crate::gates::gate::{Gate, GateInstance, GateRef, PrefixedGate};
 use crate::gates::gate_tree::Tree;
@@ -70,17 +72,7 @@ pub struct CircuitBuilder<F: RichField + Extendable<D>, const D: usize> {
     constants_to_targets: HashMap<F, Target>,
     targets_to_constants: HashMap<Target, F>,
 
-    /// A map `(c0, c1) -> (g, i)` from constants `(c0,c1)` to an available arithmetic gate using
-    /// these constants with gate index `g` and already using `i` arithmetic operations.
-    pub(crate) free_arithmetic: HashMap<(F, F), (usize, usize)>,
-
-    /// `current_switch_gates[chunk_size - 1]` contains None if we have no switch gates with the value
-    /// chunk_size, and contains `(g, i, c)`, if the gate `g`, at index `i`, already contains `c` copies
-    /// of switches
-    pub(crate) current_switch_gates: Vec<Option<(SwitchGate<F, D>, usize, usize)>>,
-
-    /// The `U32ArithmeticGate` currently being filled (so new u32 arithmetic operations will be added to this gate before creating a new one)
-    pub(crate) current_u32_arithmetic_gate: Option<(usize, usize)>,
+    batched_gates: BatchedGates<F, D>
 }
 
 impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilder<F, D> {
@@ -97,9 +89,7 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilder<F, D> {
             generators: Vec::new(),
             constants_to_targets: HashMap::new(),
             targets_to_constants: HashMap::new(),
-            free_arithmetic: HashMap::new(),
-            current_switch_gates: Vec::new(),
-            current_u32_arithmetic_gate: None,
+            batched_gates: BatchedGates::new(),
         }
     }
 
@@ -743,5 +733,130 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilder<F, D> {
             verifier_only,
             common,
         }
+    }
+}
+
+/// 
+pub struct BatchedGates<F: RichField + Extendable<D>, const D: usize> {
+    /// A map `(c0, c1) -> (g, i)` from constants `(c0,c1)` to an available arithmetic gate using
+    /// these constants with gate index `g` and already using `i` arithmetic operations.
+    pub(crate) free_arithmetic: HashMap<(F, F), (usize, usize)>,
+
+    /// `current_switch_gates[chunk_size - 1]` contains None if we have no switch gates with the value
+    /// chunk_size, and contains `(g, i, c)`, if the gate `g`, at index `i`, already contains `c` copies
+    /// of switches
+    pub(crate) current_switch_gates: Vec<Option<(SwitchGate<F, D>, usize, usize)>>,
+
+    /// The `U32ArithmeticGate` currently being filled (so new u32 arithmetic operations will be added to this gate before creating a new one)
+    pub(crate) current_u32_arithmetic_gate: Option<(usize, usize)>,
+
+    /// The `U32SubtractionGate` currently being filled (so new u32 subtraction operations will be added to this gate before creating a new one)
+    pub(crate) current_u32_subtraction_gate: Option<(usize, usize)>,
+}
+
+impl<F: RichField + Extendable<D>, const D: usize> BatchedGates<F, D> {
+    pub fn new() -> Self {
+        Self {
+            free_arithmetic: HashMap::new(),
+            current_switch_gates: Vec::new(),
+            current_u32_arithmetic_gate: None,
+            current_u32_subtraction_gate: None,
+        }
+    }
+}
+
+impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilder<F, D> {
+    /// Finds the last available arithmetic gate with the given constants or add one if there aren't any.
+    /// Returns `(g,i)` such that there is an arithmetic gate with the given constants at index
+    /// `g` and the gate's `i`-th operation is available.
+    pub fn find_arithmetic_gate(&mut self, const_0: F, const_1: F) -> (usize, usize) {
+        let (gate, i) = self
+            .batched_gates
+            .free_arithmetic
+            .get(&(const_0, const_1))
+            .copied()
+            .unwrap_or_else(|| {
+                let gate = self.add_gate(
+                    ArithmeticExtensionGate::new_from_config(&self.config),
+                    vec![const_0, const_1],
+                );
+                (gate, 0)
+            });
+
+        // Update `free_arithmetic` with new values.
+        if i < ArithmeticExtensionGate::<D>::num_ops(&self.config) - 1 {
+            self.batched_gates
+                .free_arithmetic
+                .insert((const_0, const_1), (gate, i + 1));
+        } else {
+            self.batched_gates.free_arithmetic.remove(&(const_0, const_1));
+        }
+
+        (gate, i)
+    }
+
+    pub fn find_switch_gate(&mut self, chunk_size: usize) -> (SwitchGate<F, D>, usize, usize) {
+        if self.batched_gates.current_switch_gates.len() < chunk_size {
+            self.batched_gates.current_switch_gates
+                .extend(vec![None; chunk_size - self.current_switch_gates.len()]);
+        }
+
+        let (gate, gate_index, mut next_copy) =
+            match self.current_switch_gates[chunk_size - 1].clone() {
+                None => {
+                    let gate = SwitchGate::<F, D>::new_from_config(self.config.clone(), chunk_size);
+                    let gate_index = self.add_gate(gate.clone(), vec![]);
+                    (gate, gate_index, 0)
+                }
+                Some((gate, idx, next_copy)) => (gate, idx, next_copy),
+            };
+        
+        let num_copies = gate.num_copies;
+        
+        if next_copy == num_copies {
+            self.batched_gates.current_switch_gates[chunk_size - 1] = None;
+        } else {
+            self.batched_gates.current_switch_gates[chunk_size - 1] = Some((gate, gate_index, next_copy + 1));
+        }
+
+        (gate, gate_index, next_copy)
+    }
+
+    pub fn find_u32_arithmetic_gate(&mut self) -> (usize, usize) {
+        let (gate_index, copy) = match self.batched_gates.current_u32_arithmetic_gate {
+            None => {
+                let gate = U32ArithmeticGate::new();
+                let gate_index = self.add_gate(gate, vec![]);
+                (gate_index, 0)
+            }
+            Some((gate_index, copy)) => (gate_index, copy),
+        };
+
+        if copy == NUM_U32_ARITHMETIC_OPS - 1 {
+            self.current_u32_arithmetic_gate = None;
+        } else {
+            self.current_u32_arithmetic_gate = Some((gate_index, copy + 1));
+        }
+
+        (gate_index, copy)
+    }
+
+    pub fn find_u32_subtraction_gate(&mut self) -> (usize, usize) {
+        let (gate_index, copy) = match self.batched_gates.current_u32_subtraction_gate {
+            None => {
+                let gate = U32SubtractionGate::new();
+                let gate_index = self.add_gate(gate, vec![]);
+                (gate_index, 0)
+            }
+            Some((gate_index, copy)) => (gate_index, copy),
+        };
+
+        if copy == NUM_U32_SUBTRACTION_OPS - 1 {
+            self.current_u32_subtraction_gate = None;
+        } else {
+            self.current_u32_subtraction_gate = Some((gate_index, copy + 1));
+        }
+
+        (gate_index, copy)
     }
 }
