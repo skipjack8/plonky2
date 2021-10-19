@@ -5,6 +5,7 @@ use std::iter::{Product, Sum};
 use std::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Neg, Sub, SubAssign};
 
 use num::bigint::BigUint;
+use num::Integer;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 
@@ -81,6 +82,14 @@ impl Field for CrandallField {
 
     fn try_inverse(&self) -> Option<Self> {
         try_inverse_u64(self.0, Self::ORDER).map(|inv| Self(inv))
+    }
+
+    fn from_biguint(n: BigUint) -> Self {
+        Self(n.mod_floor(&Self::order()).to_u64_digits()[0])
+    }
+
+    fn to_biguint(&self) -> BigUint {
+        self.to_canonical_u64().into()
     }
 
     #[inline]
