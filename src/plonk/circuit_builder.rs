@@ -168,6 +168,7 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilder<F, D> {
             gate_ref,
             constants,
         });
+
         index
     }
 
